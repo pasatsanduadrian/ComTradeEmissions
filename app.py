@@ -4,30 +4,24 @@ import requests
 from flask import Flask, request
 from pyngrok import ngrok
 from dotenv import load_dotenv
+import threading
 
-# ==========================
-# Config & Utility Functions
-# ==========================
-load_dotenv()  # Load .env if available
-
+# ============ Config & ENV =================
+load_dotenv()
 EXCEL_FILE = os.environ.get("EMISSIONS_FILE", "emissions.xlsx")
 COMTRADE_API_KEY = os.environ.get("COMTRADE_API_KEY")
 NGROK_TOKEN = os.environ.get("NGROK_TOKEN")
 NGROK_HOSTNAME = os.environ.get("NGROK_HOSTNAME", None)
 PORT = int(os.environ.get("PORT", "5099"))
 
-# ==========================
-# Data Loading Functions
-# ==========================
+# ========== Load Data & Prepare UI =========
 def load_emissions_data(path):
     df_emis = pd.read_excel(path, sheet_name="Sheet1")
     df_emis["Code"] = df_emis["Code"].astype(str).str.strip()
     df_emis["Description"] = df_emis["Description"].astype(str).str.strip()
-
     df_HS = pd.read_excel(path, sheet_name="Sheet2")
     df_HS["HS Code"] = df_HS["HS Code"].astype(str).str.strip()
     df_HS["Description"] = df_HS["Description"].astype(str).str.strip()
-
     df_country = pd.read_excel(path, sheet_name="Sheet3")
     df_country["Country"] = df_country["Country"].astype(str).str.strip()
     df_country["ID"] = df_country["ID"].astype(str).str.strip()
@@ -65,60 +59,89 @@ country_name_mapping = {
     "Serbia and Montenegro (...2005)": "Serbia",
     "Sikkim, Protectorate of India (...1974)": "India"
 }
-
 eu_countries = [
     "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czechia", "Denmark", "Estonia", "Finland", "France",
     "Germany", "Greece", "Hungary", "Ireland", "Italy", "Latvia", "Lithuania", "Luxembourg", "Malta", "Netherlands",
     "Poland", "Portugal", "Romania", "Slovakia", "Slovenia", "Spain", "Sweden"
 ]
 
-# ==========================
-# Flask App & UI
-# ==========================
+# Load data at start
 df_emis, df_HS, df_country = load_emissions_data(EXCEL_FILE)
 hs_options, reporter_options = build_dropdowns(df_HS, df_country)
 country_code_desc_to_emis, weighted_code_desc_to_emis = build_emissions_dicts(df_emis)
 
+# ========== Flask App ==========
 app = Flask(__name__)
 
-HTML_FORM = f"""<!DOCTYPE html>
+HTML_FORM = f"""
+<!DOCTYPE html>
 <html>
 <head>
     <title>CBAM CO₂ Emissions Estimator for Imports</title>
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
     <style>
-      body {{font-family: Arial, sans-serif; margin: 40px; background-color: #f8f9fa;}}
-      .container {{background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}}
+      body {{
+          font-family: Arial, sans-serif;
+          margin: 40px;
+          background-color: #f8f9fa;
+      }}
+      .container {{
+          background-color: #ffffff;
+          padding: 30px;
+          border-radius: 8px;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      }}
+      h1 {{
+          margin-bottom: 10px;
+      }}
+      p.description {{
+          font-size: 1.1em;
+          margin-bottom: 30px;
+      }}
+      .header-img {{
+          max-width: 100%;
+          height: auto;
+          margin-bottom: 20px;
+      }}
     </style>
 </head>
 <body>
     <div class="container">
+      <img src="https://oneclicklca.com/hubfs/Blog%20images/Decarbonization%20News/decarbonizationnews_infographics_cbam_how%20does%20CBAM%20work.webp" class="header-img" alt="CBAM Illustration"/>
       <h1>CBAM CO₂ Emissions Estimator for Imports</h1>
+      <p class="description">
+        With the CBAM framework increasingly shaping global trade for carbon-intensive goods, our application helps stakeholders quickly retrieve, analyze, and estimate the CO₂ emissions embedded in imports. By pairing UN Comtrade data with country- and commodity-specific emission factors, it offers a streamlined method to gauge potential CBAM obligations and support more sustainable trade practices.
+      </p>
       <form method="POST" action="/compute">
           <div class="form-group">
-              <label for="year">Year (YYYY):</label>
+              <label for="year">Enter Year (YYYY):</label>
               <input type="text" class="form-control" name="year" value="2021" required/>
           </div>
           <div class="form-group">
-              <label for="reporter">Reporter Country (Country | ID):</label>
-              <select name="reporter" class="form-control" required>{reporter_options}</select>
+              <label for="reporter">Select Reporter Country (Country | ID):</label>
+              <select name="reporter" class="form-control" required>
+                  {reporter_options}
+              </select>
           </div>
           <div class="form-group">
-              <label for="flowCode">Flow Code:</label>
+              <label for="flowCode">Flow Code (M=import, X=export):</label>
               <select name="flowCode" class="form-control" required>
                   <option value="M">Import</option>
                   <option value="X">Export</option>
               </select>
           </div>
           <div class="form-group">
-              <label for="HSCodeDesc">HS Code + Description:</label>
-              <select name="HSCodeDesc" class="form-control" required>{hs_options}</select>
+              <label for="HSCodeDesc">Select HS Code + Description:</label>
+              <select name="HSCodeDesc" class="form-control" required>
+                  {hs_options}
+              </select>
           </div>
           <button type="submit" class="btn btn-primary">Compute</button>
       </form>
     </div>
 </body>
-</html>"""
+</html>
+"""
 
 @app.route("/", methods=["GET"])
 def index():
@@ -126,20 +149,16 @@ def index():
 
 @app.route("/compute", methods=["POST"])
 def compute():
-    # --- Parse form data ---
     year = request.form.get("year", "2021")
     reporter_combined = request.form.get("reporter", "")
     flowCode = request.form.get("flowCode", "M")
     hs_combined = request.form.get("HSCodeDesc", "")
 
-    # Validare rapidă
     if "|" not in reporter_combined or "|" not in hs_combined:
         return "<h3>Error: Invalid input.</h3>"
-
     reporter_country, reporter_id = [s.strip() for s in reporter_combined.split("|", 1)]
     HSCode, HSDesc = [s.strip() for s in hs_combined.split("|", 1)]
 
-    # --- API Request ---
     BASE_URL = "https://comtradeapi.un.org/data/v1/get/C/A/HS"
     params = {
         "reporterCode": reporter_id,
@@ -160,7 +179,7 @@ def compute():
         return "<h3>No data found for selection.</h3>"
     df_data = pd.DataFrame(data_list)
 
-    # --- Filtrare și pregătire ---
+    # Filter and process
     for col in ("motDesc", "customsDesc"):
         if col in df_data.columns:
             df_data[col] = df_data[col].astype(str).str.strip()
@@ -169,7 +188,6 @@ def compute():
     if df_data.empty:
         return "<h3>No data after filter (TOTAL MOT/CPC).</h3>"
 
-    # --- Columns, calcul greutate, emisii ---
     columns_mapping = {
         "period": "Period", "flowDesc": "Trade Flow", "reporterDesc": "Reporter",
         "partnerDesc": "Partner", "partner2Desc": "2nd Partner", "cmdCode": "Commodity Code",
@@ -187,7 +205,6 @@ def compute():
             return round(row["Alternate Qty"] / 1000.0, 2)
         return row["Net Weight (ton)"]
     df_selected["Final Weight (ton)"] = df_selected.apply(calc_final_weight, axis=1)
-
     all_second_world = (df_selected["2nd Partner"].nunique() == 1 and df_selected["2nd Partner"].unique()[0] == "World")
 
     def calc_emissions(row):
@@ -209,7 +226,6 @@ def compute():
 
     df_emissions_calc = df_selected.apply(calc_emissions, axis=1)
     df_result = pd.concat([df_selected, df_emissions_calc], axis=1)
-
     final_columns = [
         "Year", "Period", "Trade Flow", "Reporter", "Partner", "2nd Partner",
         "Commodity Code", "Commodity Desc", "Trade Value (US$)", "Net Weight (kg)",
@@ -221,42 +237,99 @@ def compute():
     for col in ["CO2_Direct", "CO2_Indirect", "CO2_Total"]:
         df_result[col] = df_result[col].apply(lambda x: f"{x:.2f} ton CO₂")
 
-    html_table = df_result.to_html(index=False, classes="table table-striped table-bordered", border=0)
+    html_table = df_result.to_html(
+        index=False, classes="table table-striped table-bordered", border=0
+    )
 
     html_response = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>CBAM CO₂ Emissions Dashboard</title>
+        <!-- Bootstrap 4 CSS -->
         <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+        <!-- DataTables CSS (Bootstrap 4) -->
+        <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap4.min.css">
+        <!-- DataTables Buttons extension CSS (Bootstrap 4) -->
+        <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/buttons/2.3.6/css/buttons.bootstrap4.min.css">
+        <!-- jQuery and DataTables JS -->
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+        <script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap4.min.js"></script>
+        <script src="https://cdn.datatables.net/buttons/2.3.6/js/dataTables.buttons.min.js"></script>
+        <script src="https://cdn.datatables.net/buttons/2.3.6/js/buttons.bootstrap4.min.js"></script>
+        <script src="https://cdn.datatables.net/buttons/2.3.6/js/buttons.colVis.min.js"></script>
         <style>
-            body {{background-color: #f6f8fa; color: #222; font-family: Arial, sans-serif; margin: 20px;}}
-            .dashboard-container {{background-color: #fff; padding: 20px; border-radius: 8px;}}
-            .table-responsive {{overflow-x: auto;}}
-            table th, table td {{font-size:13px;}}
+            body {{
+                background-color: #1f1f1f;
+                color: #fff;
+                font-family: Arial, sans-serif;
+                margin: 20px;
+            }}
+            h3 {{
+                margin-bottom: 20px;
+            }}
+            .dashboard-container {{
+                background-color: #2f2f2f;
+                padding: 20px;
+                border-radius: 8px;
+            }}
+            .dataTables_wrapper .dt-buttons {{
+                float: left;
+                margin-bottom: 10px;
+            }}
+            .dataTables_filter {{
+                float: right;
+            }}
+            .table-responsive {{
+                overflow-x: auto;
+            }}
+            table.dataTable thead th,
+            table.dataTable tbody td {{
+                color: #fff !important;
+                background-color: #3a3a3a !important;
+            }}
+            table.table-striped tbody tr:nth-of-type(odd) td {{
+                background-color: #353535 !important;
+            }}
         </style>
     </head>
     <body>
-        <div class="container dashboard-container">
+        <div class="container-fluid dashboard-container">
             <h3>CBAM CO₂ Emissions Dashboard for year={year}, HSCode={HSCode} ({HSDesc}), Flow={flowCode}</h3>
-            <div class="table-responsive">{html_table}</div>
+            <div class="table-responsive">
+                {html_table}
+            </div>
         </div>
+        <script>
+          $(document).ready(function() {{
+              $('table.table').DataTable({{
+                  dom: 'Bfrtip',
+                  buttons: [
+                      {{
+                          extend: 'colvis',
+                          text: 'Hide/Show Columns'
+                      }}
+                  ],
+                  paging: true,
+                  searching: true,
+                  ordering: true,
+                  scrollX: true,
+                  autoWidth: false
+              }});
+          }});
+        </script>
     </body>
     </html>
     """
     return html_response
 
-# ==========================
-# App Runner (ngrok/local)
-# ==========================
+# ========== NGROK/FLASK RUNNER ==========
 def start_ngrok(app, port):
     if NGROK_TOKEN:
         ngrok.set_auth_token(NGROK_TOKEN)
         try:
-            if NGROK_HOSTNAME:
-                public_url = ngrok.connect(port, hostname=NGROK_HOSTNAME)
-            else:
-                public_url = ngrok.connect(port)
+            public_url = ngrok.connect(port, hostname=NGROK_HOSTNAME) if NGROK_HOSTNAME else ngrok.connect(port)
             print(f"Public URL: {public_url.public_url}")
         except Exception as e:
             print("Error with static domain, fallback:", e)
@@ -267,4 +340,4 @@ def start_ngrok(app, port):
     app.run(port=port, debug=False)
 
 if __name__ == "__main__":
-    start_ngrok(app, PORT)
+    threading.Thread(target=lambda: start_ngrok(app, PORT)).start()
