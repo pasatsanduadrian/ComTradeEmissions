@@ -1,0 +1,6 @@
+flask
+pyngrok
+pandas
+requests
+python-dotenv
+openpyxl
