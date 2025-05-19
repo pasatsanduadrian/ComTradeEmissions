@@ -253,7 +253,10 @@ def start_ngrok(app, port):
     if NGROK_TOKEN:
         ngrok.set_auth_token(NGROK_TOKEN)
         try:
-            public_url = ngrok.connect(port, hostname=NGROK_HOSTNAME) if NGROK_HOSTNAME else ngrok.connect(port)
+            if NGROK_HOSTNAME:
+                public_url = ngrok.connect(port, hostname=NGROK_HOSTNAME)
+            else:
+                public_url = ngrok.connect(port)
             print(f"Public URL: {public_url.public_url}")
         except Exception as e:
             print("Error with static domain, fallback:", e)
